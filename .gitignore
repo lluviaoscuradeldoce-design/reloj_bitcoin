@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+*.csv
+*.log
+*.pkl
+ml_training_data.csv
+training_data.csv
+bot.log
+trading_log.txt
+.vscode/
+.gemini/
