@@ -40,15 +40,15 @@ except ImportError as e:
 # --- PAPER TRADING ENGINE WITH ADVANCED RISK MANAGEMENT ---
 class PaperTrader:
     def __init__(self):
-        self.balance = 10000.0 
-        self.initial_balance = 10000.0
+        self.balance = 100.0 
+        self.initial_balance = 100.0
         self.positions = [] 
         self.history = [] 
         self.csv_file = "training_data.csv"
         
         # Daily Risk Management
         self.daily_pnl = 0.0
-        self.daily_loss_limit = -500.0  # Max -$500 per day
+        self.daily_loss_limit = -20.0  # Max -$20 per day (20% of account)
         self.trading_enabled = True
         self.last_reset_date = time.strftime('%Y-%m-%d')
         
@@ -78,7 +78,7 @@ class PaperTrader:
         if not self.can_trade():
             return None
             
-        risk_amt = self.balance * 0.01  # 1% risk per trade
+        risk_amt = self.balance * TRADING_CONFIG['risk_per_trade']  # Dynamic risk from config
         dist = abs(entry_price - sl)
         if dist == 0: return None
         
@@ -236,21 +236,19 @@ class CryptoWidget:
         self.log_file = "trading_log.txt"
         self.trader = PaperTrader()
         
-        self.data = {
-            'BTC': self.init_coin_state(),
-            'ETH': self.init_coin_state()
-        }
+        # Initialize data structures dynamically from config
+        self.data = {}
+        self.liq_map = {}
+        self.last_signal_time = {}
         
-        self.liq_map = {'BTC': [], 'ETH': []} # Store significant levels
-        
+        for symbol in TRADING_CONFIG['symbols']:
+            self.data[symbol] = self.init_coin_state()
+            self.liq_map[symbol] = []
+            self.last_signal_time[symbol] = {'BUY': 0, 'SELL': 0}
+
         self.last_alert_time = 0
         self.alert_cooldown = 300 
         
-        self.last_signal_time = {
-            'BTC': {'BUY': 0, 'SELL': 0},
-            'ETH': {'BUY': 0, 'SELL': 0}
-        }
-
         self.setup_ui()
         
         self.running = True
@@ -333,13 +331,40 @@ class CryptoWidget:
         self.close_btn.pack(side='left')
         self.close_btn.bind('<Button-1>', lambda e: self.root.destroy())
 
-        # Coin displays
-        self.create_coin_ui("BTC")
-        tk.Frame(self.frame, height=3, bg='#333333').pack(fill='x', pady=30)
-        self.create_coin_ui("ETH")
+        # --- SCROLLABLE AREA SETUP ---
+        # 1. Canvas and Scrollbar
+        self.canvas = tk.Canvas(self.frame, bg='#1a1a1a', highlightthickness=0)
+        self.scrollbar = tk.Scrollbar(self.frame, orient="vertical", command=self.canvas.yview)
+        
+        # 2. Scrollable Frame (holds the coins)
+        self.scrollable_frame = tk.Frame(self.canvas, bg='#1a1a1a')
+        
+        self.scrollable_frame.bind(
+            "<Configure>",
+            lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+        )
+        
+        # 3. Create window in canvas
+        self.canvas.create_window((0, 0), window=self.scrollable_frame, anchor="nw", width=self.screen_w * 0.7) # Approx width
+        
+        self.canvas.configure(yscrollcommand=self.scrollbar.set)
+        
+        # 4. Pack scroll elements
+        self.canvas.pack(side="left", fill="both", expand=True)
+        self.scrollbar.pack(side="right", fill="y")
+        
+        # Mousewheel scrolling
+        self.canvas.bind_all("<MouseWheel>", lambda e: self.canvas.yview_scroll(int(-1*(e.delta/120)), "units"))
 
-        self.status_label = tk.Label(self.frame, text="System Active", font=('Segoe UI', 16), bg='#1a1a1a', fg='#444444')
-        self.status_label.pack(anchor='w', pady=(20, 0))
+        # --- DYNAMIC COIN UI GENERATION ---
+        for i, symbol in enumerate(TRADING_CONFIG['symbols']):
+            self.create_coin_ui(symbol)
+            # Add separator if not last
+            if i < len(TRADING_CONFIG['symbols']) - 1:
+                tk.Frame(self.scrollable_frame, height=2, bg='#333333').pack(fill='x', pady=20)
+
+        self.status_label = tk.Label(self.scrollable_frame, text="System Active - 8 Pairs Optimized", font=('Segoe UI', 14), bg='#1a1a1a', fg='#444444')
+        self.status_label.pack(anchor='w', pady=(30, 0))
         
 
 
@@ -364,7 +389,8 @@ class CryptoWidget:
             f.write(f"{time.strftime('%Y-%m-%d')} {full_msg}\n")
 
     def create_coin_ui(self, symbol):
-        frame = tk.Frame(self.frame, bg='#1a1a1a')
+        # Use scrollable_frame as parent instead of self.frame
+        frame = tk.Frame(self.scrollable_frame, bg='#1a1a1a')
         frame.pack(fill='both', expand=True, pady=5)
         
         # Row 1: Price and Signal
@@ -398,7 +424,16 @@ class CryptoWidget:
 
     def start_websocket(self):
         """Start WebSocket with auto-reconnect."""
-        streams = "btcusdt@markPrice@1s/ethusdt@markPrice@1s/!forceOrder@arr/btcusdt@aggTrade/ethusdt@aggTrade"
+        # Dynamic stream generation
+        streams_list = []
+        for s in TRADING_CONFIG['symbols']:
+            curr = s.lower()
+            streams_list.append(f"{curr}usdt@markPrice@1s")
+            streams_list.append(f"{curr}usdt@aggTrade")
+        
+        streams_list.append("!forceOrder@arr") # Global force order stream
+        
+        streams = "/".join(streams_list)
         url = f"wss://fstream.binance.com/stream?streams={streams}"
         
         while self.running:
@@ -433,7 +468,7 @@ class CryptoWidget:
             
             elif 'aggTrade' in stream:
                 symbol = data['s'].replace('USDT', '')
-                if symbol in ["BTC", "ETH"]:
+                if symbol in self.data:
                     price = float(data['p'])
                     qty = float(data['q'])
                     is_maker = data['m']
@@ -444,7 +479,7 @@ class CryptoWidget:
             elif 'forceOrder' in stream:
                 order = data['o']
                 symbol = order['s'].replace('USDT', '')
-                if symbol in ["BTC", "ETH"]:
+                if symbol in self.data:
                     side = order['S']
                     qty = float(order['q'])
                     price = float(order['p'])
@@ -677,12 +712,17 @@ class CryptoWidget:
         while self.running:
             curr = time.time()
             if curr - last_fetch > 5:
-                self.fetch_analytics("BTC")
-                self.fetch_analytics("ETH")
+                for sym in TRADING_CONFIG['symbols']:
+                    self.fetch_analytics(sym)
                 self.root.after(0, self.update_stats_ui)
                 last_fetch = curr
             
-            prices = {'BTC': self.data['BTC']['mark'], 'ETH': self.data['ETH']['mark']}
+            # Prepare prices dict
+            prices = {}
+            for sym in TRADING_CONFIG['symbols']:
+                if sym in self.data:
+                    prices[sym] = self.data[sym]['mark']
+            
             closed_trades = self.trader.update(prices)
             if closed_trades:
                 for t in closed_trades:
@@ -772,7 +812,7 @@ class CryptoWidget:
         lbl.configure(text=f"{symbol}: ${price:,.2f}")
 
     def update_stats_ui(self):
-        for sym in ["BTC", "ETH"]:
+        for sym in TRADING_CONFIG['symbols']:
             d = self.data[sym]
             
             lbl_stats = getattr(self, f"{sym}_stats")

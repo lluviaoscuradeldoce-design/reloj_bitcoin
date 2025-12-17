@@ -6,9 +6,9 @@ Edit these values to customize bot behavior.
 
 # ============ TRADING CONFIGURATION ============
 TRADING_CONFIG = {
-    'symbols': ['BTC', 'ETH'],          # Trading pairs
-    'risk_per_trade': 0.01,             # 1% of balance per trade
-    'daily_loss_limit': -500.0,          # Max daily loss in USD
+    'symbols': ['BTC', 'ETH', 'SOL', 'BNB', 'XRP', 'DOGE', 'ADA', 'AVAX'],
+    'risk_per_trade': 0.05,             # 5% risk per trade (Optimized for $100 account)
+    'daily_loss_limit': -20.0,           # Max daily loss in USD (20% of $100)
     'signal_cooldown': 300,              # 5 minutes between signals
     'alert_cooldown': 300,               # 5 minutes between sound alerts
 }
