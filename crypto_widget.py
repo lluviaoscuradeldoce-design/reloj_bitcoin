@@ -24,7 +24,7 @@ logger = logging.getLogger('SniperBot')
 
 # --- IMPORT CONFIG AND NOTIFICATIONS ---
 try:
-    from config import TELEGRAM_CONFIG, TRADING_CONFIG
+    from config import TELEGRAM_CONFIG, TRADING_CONFIG, WEBSOCKET_CONFIG
     from notifications import init_notifier, get_notifier
     
     # Initialize Telegram notifier
@@ -518,8 +518,9 @@ class CryptoWidget:
         d = self.data[symbol]
         
         try:
+            # 1. 15m Klines (Main Indicators)
             req = urllib.request.Request(f"https://fapi.binance.com/fapi/v1/klines?symbol={symbol}USDT&interval=15m&limit=210", headers=headers)
-            with urllib.request.urlopen(req) as r:
+            with urllib.request.urlopen(req, timeout=2) as r:
                 klines_15 = json.loads(r.read().decode())
                 closes_15 = [float(k[4]) for k in klines_15]
                 highs_15 = [float(k[2]) for k in klines_15]
@@ -536,19 +537,17 @@ class CryptoWidget:
                 
                 d['vol_ratio'] = volumes_15[-1] / (sum(volumes_15[-21:-1])/20) if len(volumes_15) > 20 else 1.0
 
+            # 2. 1h Klines (Trend Confirmation)
             req_1h = urllib.request.Request(f"https://fapi.binance.com/fapi/v1/klines?symbol={symbol}USDT&interval=1h&limit=210", headers=headers)
-            with urllib.request.urlopen(req_1h) as r:
+            with urllib.request.urlopen(req_1h, timeout=2) as r:
                 klines_1h = json.loads(r.read().decode())
                 closes_1h = [float(k[4]) for k in klines_1h]
                 d['ema200_1h'] = self.calculate_ema_value(closes_1h, 200)
                 d['trend_1h'] = 'BULL' if closes_1h[-1] > d['ema200_1h'] else 'BEAR'
 
-            req_fund = urllib.request.Request(f"https://fapi.binance.com/fapi/v1/premiumIndex?symbol={symbol}USDT", headers=headers)
-            with urllib.request.urlopen(req_fund) as r:
-                d['funding'] = float(json.loads(r.read().decode())['lastFundingRate']) * 100
-
+            # 3. Order Book Depth (OBI) - Crucial for Scalping
             req_depth = urllib.request.Request(f"https://fapi.binance.com/fapi/v1/depth?symbol={symbol}USDT&limit=20", headers=headers)
-            with urllib.request.urlopen(req_depth) as r:
+            with urllib.request.urlopen(req_depth, timeout=2) as r:
                 depth = json.loads(r.read().decode())
                 b = sum([float(x[1]) for x in depth['bids']])
                 a = sum([float(x[1]) for x in depth['asks']])
@@ -714,37 +713,41 @@ class CryptoWidget:
     def analytics_loop(self):
         last_fetch = 0
         while self.running:
-            curr = time.time()
-            if curr - last_fetch > 5:
-                for sym in TRADING_CONFIG['symbols']:
-                    self.fetch_analytics(sym)
-                    # CVD Decay: Prevent infinite accumulation bias
-                    if sym in self.data:
-                         self.data[sym]['cvd'] *= 0.95
-                self.root.after(0, self.update_stats_ui)
-                last_fetch = curr
-            
-            # Prepare prices dict
-            prices = {}
-            for sym in TRADING_CONFIG['symbols']:
-                if sym in self.data:
-                    prices[sym] = self.data[sym]['mark']
-            
-            closed_trades = self.trader.update(prices)
-            if closed_trades:
-                for t in closed_trades:
-                    pnl_txt = f"{'+' if t['pnl'] > 0 else ''}${t['pnl']:.2f}"
-                    msg = "WIN" if t['pnl'] > 0 else "LOSS"
-                    self.root.after(0, self.log_event, f"{t['symbol']} {msg} {pnl_txt} ({t['reason']})")
-                    
-                    # Telegram notification
-                    if telegram:
-                        telegram.send_trade_result(t['symbol'], t['side'], t['pnl'], t['reason'])
-                        # Check if daily limit was hit
-                        if not self.trader.trading_enabled:
-                            telegram.send_daily_limit_hit(self.trader.daily_pnl)
+            try:
+                curr = time.time()
+                if curr - last_fetch > 5:
+                    for sym in TRADING_CONFIG['symbols']:
+                        self.fetch_analytics(sym)
+                        # CVD Decay: Prevent infinite accumulation bias
+                        if sym in self.data:
+                             self.data[sym]['cvd'] *= 0.95
+                    self.root.after(0, self.update_stats_ui)
+                    last_fetch = curr
                 
-                self.root.after(0, self.update_wallet_ui)
+                # Prepare prices dict
+                prices = {}
+                for sym in TRADING_CONFIG['symbols']:
+                    if sym in self.data:
+                        prices[sym] = self.data[sym]['mark']
+                
+                closed_trades = self.trader.update(prices)
+                if closed_trades:
+                    for t in closed_trades:
+                        pnl_txt = f"{'+' if t['pnl'] > 0 else ''}${t['pnl']:.2f}"
+                        msg = "WIN" if t['pnl'] > 0 else "LOSS"
+                        self.root.after(0, self.log_event, f"{t['symbol']} {msg} {pnl_txt} ({t['reason']})")
+                        
+                        # Telegram notification
+                        if telegram:
+                            telegram.send_trade_result(t['symbol'], t['side'], t['pnl'], t['reason'])
+                            # Check if daily limit was hit
+                            if not self.trader.trading_enabled:
+                                telegram.send_daily_limit_hit(self.trader.daily_pnl)
+                    
+                    self.root.after(0, self.update_wallet_ui)
+            except Exception as e:
+                logger.error(f"Critical Error in Analytics Loop: {e}")
+                
             time.sleep(1)
 
     def update_wallet_ui(self):
@@ -941,7 +944,9 @@ class CryptoWidget:
 
             lbl_sig.configure(text=sig_txt, fg=sig_col)
             
-        self.status_label.configure(text=f"Mode: Multi-Indicator Scoring + Trailing Stop")
+        # Update System Status Heartbeat
+        now_ts = time.strftime('%H:%M:%S')
+        self.status_label.configure(text=f"⚡ ACTIVE | Last Scan: {now_ts} | AI Score Mode", fg='#00ff00')
 
     def trigger_alert(self):
         t = time.time()
