@@ -26,6 +26,15 @@ logger = logging.getLogger('SniperBot')
 try:
     from config import TELEGRAM_CONFIG, TRADING_CONFIG, WEBSOCKET_CONFIG
     from notifications import init_notifier, get_notifier
+    from sentiment_engine import sentiment_engine
+    
+    # Try importing ML Trainer
+    try:
+        from ml_trainer import MLTrainer
+        ML_AVAILABLE = True
+    except ImportError:
+        ML_AVAILABLE = False
+        logger.warning("ML Libraries not found. Running in Technical Mode only.")
     
     # Initialize Telegram notifier
     telegram = init_notifier(
@@ -248,6 +257,19 @@ class CryptoWidget:
 
         self.last_alert_time = 0
         self.alert_cooldown = 300 
+        
+        # --- AI & SENTIMENT INIT ---
+        self.sentiment = sentiment_engine
+        self.sentiment.start()
+        
+        self.ml_model = None
+        if ML_AVAILABLE:
+            self.ml_trainer = MLTrainer()
+            if self.ml_trainer.load_model("trading_model.pkl"):
+                self.ml_model = self.ml_trainer
+                logger.info("🧠 ML Model Loaded Successfully")
+            else:
+                logger.warning("ML Model not found. Train it using ml_trainer.py")
         
         self.setup_ui()
         
@@ -646,6 +668,48 @@ class CryptoWidget:
         score = 0
         breakdown = []  # For debugging
         
+        # --- PHASE 8: AI HYBRID SENSORS ---
+        
+        # 1. Global Sentiment (RSS News)
+        try:
+            sent_score, _ = self.sentiment.get_sentiment()
+            if sent_score > 0.4:
+                score += 1
+                breakdown.append("News(Bull)+1")
+            elif sent_score < -0.4:
+                score -= 1
+                breakdown.append("News(Bear)-1")
+        except: pass
+
+        # 2. Machine Learning Validation
+        if self.ml_model:
+            try:
+                trend_val = 1 if d['trend_15m'] == 'BULL' else 0
+                bb_pos = 1
+                if d['bb']['lower'] > 0:
+                    if d['mark'] < d['bb']['lower']: bb_pos = 0
+                    elif d['mark'] > d['bb']['upper']: bb_pos = 2
+                    
+                features = {
+                    'rsi': d['rsi'], 'stoch_rsi': d['stoch_rsi'],
+                    'macd_hist': d['macd']['hist'], 'atr': d['atr'],
+                    'bb_position': bb_pos, 'trend': trend_val,
+                    'vol_ratio': d.get('vol_ratio', 1.0)
+                }
+                
+                pred = self.ml_model.predict(features)
+                if pred['confidence'] > 60:
+                    pts = 2 if pred['confidence'] > 80 else 1
+                    if pred['direction'] == 'UP':
+                        score += pts
+                        breakdown.append(f"AI(Up)+{pts}")
+                    else:
+                        score -= pts
+                        breakdown.append(f"AI(Down)-{pts}")
+            except Exception: pass
+        
+        # --- TECHNICAL INDICATORS ---
+        
         # 1. TREND ALIGNMENT (+/-2 points)
         # Both timeframes aligned = strong signal
         if d['trend_1h'] == d['trend_15m']:
@@ -944,9 +1008,12 @@ class CryptoWidget:
 
             lbl_sig.configure(text=sig_txt, fg=sig_col)
             
-        # Update System Status Heartbeat
+        # Update System Status Heartbeat + AI SENTIMENT
         now_ts = time.strftime('%H:%M:%S')
-        self.status_label.configure(text=f"⚡ ACTIVE | Last Scan: {now_ts} | AI Score Mode", fg='#00ff00')
+        sent_score, _ = self.sentiment.get_sentiment()
+        sent_txt = "BULLISH 🚀" if sent_score > 0.3 else "BEARISH 📉" if sent_score < -0.3 else "NEUTRAL ⚖️"
+        
+        self.status_label.configure(text=f"⚡ ACTIVE | {now_ts} | Sentiment: {sent_txt} ({sent_score:+.2f})", fg='#00ff00')
 
     def trigger_alert(self):
         t = time.time()
