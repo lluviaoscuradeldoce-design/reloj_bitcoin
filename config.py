@@ -7,7 +7,7 @@ Edit these values to customize bot behavior.
 # ============ TRADING CONFIGURATION ============
 TRADING_CONFIG = {
     'symbols': ['BTC', 'ETH', 'SOL', 'BNB', 'XRP', 'DOGE', 'ADA', 'AVAX'],
-    'risk_per_trade': 0.05,             # 5% risk per trade (Optimized for $100 account)
+    'risk_per_trade': 0.025,             # 2.5% risk (Conservative Mode)
     'daily_loss_limit': -20.0,           # Max daily loss in USD (20% of $100)
     'signal_cooldown': 300,              # 5 minutes between signals
     'alert_cooldown': 300,               # 5 minutes between sound alerts
@@ -15,8 +15,8 @@ TRADING_CONFIG = {
 
 # ============ SIGNAL THRESHOLDS ============
 SIGNAL_CONFIG = {
-    'min_score_long': 4,                 # Min score for LONG signal (out of 7)
-    'min_score_short': -4,               # Min score for SHORT signal (out of 7)
+    'min_score_long': 5,                 # Stricter: Requires Trend Alignment
+    'min_score_short': -5,               # Stricter: Requires Trend Alignment
     'atr_sl_multiplier': 2.0,            # ATR multiplier for Stop Loss (Optimized)
     'atr_tp_multiplier': 3.0,            # ATR multiplier for Take Profit (Optimized)
 }
@@ -68,8 +68,8 @@ UI_CONFIG = {
 
 # ============ WEBSOCKET CONFIGURATION ============
 WEBSOCKET_CONFIG = {
-    'ping_interval': 30,
-    'ping_timeout': 10,
+    'ping_interval': 60,
+    'ping_timeout': 30,
     'reconnect_delay': 5,
 }
 

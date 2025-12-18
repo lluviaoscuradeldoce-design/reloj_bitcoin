@@ -316,7 +316,8 @@ class CryptoWidget:
         ctrl_frame.pack(fill='x', pady=(0, 20))
         
         # Left side - Wallet
-        self.wallet_lbl = tk.Label(ctrl_frame, text="Wallet: $10,000", font=('Consolas', 22, 'bold'), bg='#1a1a1a', fg='#ffff00')
+        bal_txt = f"Wallet: ${self.trader.balance:,.0f}"
+        self.wallet_lbl = tk.Label(ctrl_frame, text=bal_txt, font=('Consolas', 22, 'bold'), bg='#1a1a1a', fg='#ffff00')
         self.wallet_lbl.pack(side='left')
         
         # Right side - Controls
@@ -446,7 +447,10 @@ class CryptoWidget:
                     on_open=lambda w: logger.info("✅ WebSocket Connected"),
                     on_close=lambda w, c, m: logger.warning(f"WebSocket Closed: {c} - {m}")
                 )
-                ws.run_forever(ping_interval=30, ping_timeout=10)
+                ws.run_forever(
+                    ping_interval=WEBSOCKET_CONFIG['ping_interval'], 
+                    ping_timeout=WEBSOCKET_CONFIG['ping_timeout']
+                )
             except Exception as e:
                 logger.error(f"WebSocket Exception: {e}")
             
@@ -714,6 +718,9 @@ class CryptoWidget:
             if curr - last_fetch > 5:
                 for sym in TRADING_CONFIG['symbols']:
                     self.fetch_analytics(sym)
+                    # CVD Decay: Prevent infinite accumulation bias
+                    if sym in self.data:
+                         self.data[sym]['cvd'] *= 0.95
                 self.root.after(0, self.update_stats_ui)
                 last_fetch = curr
             
@@ -743,7 +750,13 @@ class CryptoWidget:
     def update_wallet_ui(self):
         bal = self.trader.balance
         open_pnl = 0
-        prices = {'BTC': self.data['BTC']['mark'], 'ETH': self.data['ETH']['mark']}
+        
+        # Get all current prices
+        prices = {}
+        for sym in TRADING_CONFIG['symbols']:
+            if sym in self.data:
+                prices[sym] = self.data[sym]['mark']
+                
         for p in self.trader.positions:
             curr = prices.get(p['symbol'], p['entry'])
             if p['side'] == 'BUY': open_pnl += (curr - p['entry']) * p['size']
