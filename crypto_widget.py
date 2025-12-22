@@ -9,6 +9,12 @@ import math
 import os
 import logging
 import websocket # pip install websocket-client
+from datetime import datetime, timezone
+from concurrent.futures import ThreadPoolExecutor
+import warnings
+
+# Suppress annoying sklearn warnings about parallel execution
+warnings.filterwarnings("ignore", category=UserWarning, module="sklearn")
 
 # --- LOGGING CONFIGURATION ---
 logging.basicConfig(
@@ -24,7 +30,11 @@ logger = logging.getLogger('SniperBot')
 
 # --- IMPORT CONFIG AND NOTIFICATIONS ---
 try:
-    from config import TELEGRAM_CONFIG, TRADING_CONFIG, WEBSOCKET_CONFIG
+    from config import (
+        TELEGRAM_CONFIG, TRADING_CONFIG, WEBSOCKET_CONFIG, 
+        LIQUIDITY_CONFIG, SCORING_CONFIG, TRAILING_CONFIG, SIGNAL_CONFIG,
+        AVAILABLE_PAIRS, SCHEDULE_CONFIG
+    )
     from notifications import init_notifier, get_notifier
     from sentiment_engine import sentiment_engine
     
@@ -66,7 +76,7 @@ class PaperTrader:
     def _init_csv(self):
         if not os.path.exists(self.csv_file):
             with open(self.csv_file, "w") as f:
-                f.write("symbol,side,rsi,stoch_rsi,macd_hist,atr,obi,cvd,trend_1h,vol_ratio,score,outcome,pnl_percent\n")
+                f.write("symbol,side,rsi,stoch_rsi,macd_hist,atr,obi,cvd,vol_ratio,vpin,liq_vol,funding,oi,sentiment,score,outcome,pnl_percent\n")
     
     def check_daily_reset(self):
         """Reset daily PnL at midnight."""
@@ -79,9 +89,19 @@ class PaperTrader:
         return False
     
     def can_trade(self):
-        """Check if trading is allowed (daily limit not hit)."""
+        """Check if trading is allowed (daily limit + max positions)."""
         self.check_daily_reset()
-        return self.trading_enabled
+        
+        # Check daily loss limit
+        if not self.trading_enabled:
+            return False
+            
+        # Check concurrent positions limit
+        max_trades = TRADING_CONFIG.get('max_active_trades', 5)
+        if len(self.positions) >= max_trades:
+            return False
+            
+        return True
 
     def open_position(self, symbol, side, entry_price, sl, tp, features, atr):
         if not self.can_trade():
@@ -93,11 +113,22 @@ class PaperTrader:
         
         size_qty = risk_amt / dist
         
+        # Leverage Cap (e.g., max 10x)
+        max_lev = TRADING_CONFIG.get('max_leverage', 10)
+        max_notional = self.balance * max_lev
+        notional = size_qty * entry_price
+        
+        if notional > max_notional:
+            size_qty = max_notional / entry_price
+            logger.info(f"⚡ LEVERAGE CAP: Position resized to {max_lev}x leverage.")
+        
         trade = {
             'symbol': symbol,
             'side': side,
             'entry': entry_price,
             'size': size_qty,
+            'margin': risk_amt,        # Margin used
+            'notional': notional,      # Total position size
             'sl': sl,
             'tp': tp,
             'original_sl': sl,  # Keep original for reference
@@ -132,25 +163,25 @@ class PaperTrader:
             # --- MULTI-LEVEL TRAILING STOP ---
             new_sl = p['sl']
             
-            if profit_atr >= 1.5 and p['trailing_level'] < 3:
-                # LEVEL 3: Aggressive Trail (0.5 ATR)
+            if profit_atr >= TRAILING_CONFIG['level_3_activation'] and p['trailing_level'] < 3:
+                # LEVEL 3: Aggressive Trail
                 p['trailing_level'] = 3
                 p['trailing_active'] = True
                 if p['side'] == 'BUY':
-                    new_sl = curr - (0.5 * atr)
+                    new_sl = curr - (TRAILING_CONFIG['level_3_trail_atr'] * atr)
                 else:
-                    new_sl = curr + (0.5 * atr)
+                    new_sl = curr + (TRAILING_CONFIG['level_3_trail_atr'] * atr)
                     
-            elif profit_atr >= 1.0 and p['trailing_level'] < 2:
-                # LEVEL 2: Lock 25% profit
+            elif profit_atr >= TRAILING_CONFIG['level_2_activation'] and p['trailing_level'] < 2:
+                # LEVEL 2: Lock profit
                 p['trailing_level'] = 2
                 p['trailing_active'] = True
                 if p['side'] == 'BUY':
-                    new_sl = entry + (0.25 * atr)
+                    new_sl = entry + (TRAILING_CONFIG['level_2_lock_percent'] * atr)
                 else:
-                    new_sl = entry - (0.25 * atr)
+                    new_sl = entry - (TRAILING_CONFIG['level_2_lock_percent'] * atr)
                     
-            elif profit_atr >= 0.3 and p['trailing_level'] < 1:
+            elif profit_atr >= TRAILING_CONFIG['level_1_activation'] and p['trailing_level'] < 1:
                 # LEVEL 1: Break Even
                 p['trailing_level'] = 1
                 p['trailing_active'] = True
@@ -159,11 +190,11 @@ class PaperTrader:
             # Continue trailing if Level 3 is active
             if p['trailing_level'] == 3:
                 if p['side'] == 'BUY':
-                    trail_sl = curr - (0.5 * atr)
+                    trail_sl = curr - (TRAILING_CONFIG['level_3_trail_atr'] * atr)
                     if trail_sl > p['sl']:
                         new_sl = trail_sl
                 else:
-                    trail_sl = curr + (0.5 * atr)
+                    trail_sl = curr + (TRAILING_CONFIG['level_3_trail_atr'] * atr)
                     if trail_sl < p['sl']:
                         new_sl = trail_sl
             
@@ -210,9 +241,13 @@ class PaperTrader:
         pnl_pct = (trade['pnl'] / self.balance) * 100 
         score = f.get('score', 0)
         
+        # Extended Header with Alpha Features (Institutional Grade)
         row = f"{trade['symbol']},{trade['side']},{f['rsi']:.2f}," \
               f"{f['stoch_rsi']:.2f},{f['macd_hist']:.4f},{f['atr']:.2f}," \
-              f"{f['obi']:.2f},{f['cvd']:.2f},{f['trend_1h']},{f['vol_ratio']:.2f}," \
+              f"{f['obi']:.2f},{f['cvd']:.2f},{f['vol_ratio']:.2f}," \
+              f"{f.get('vpin', 0):.2f},{f.get('liq_vol', 0):.2f}," \
+              f"{f.get('funding', 0):.6f},{f.get('oi', 0):.0f}," \
+              f"{f.get('sentiment', 0):.2f}," \
               f"{score},{outcome},{pnl_pct:.4f}\n"
               
         with open(self.csv_file, "a") as file:
@@ -224,6 +259,7 @@ class CryptoWidget:
     def __init__(self, root):
         self.root = root
         self.root.title("Sniper Bot Pro")
+        self.running = True  # Initialize before starting any threads
         
         # Responsive UI - Get screen dimensions
         screen_w = root.winfo_screenwidth()
@@ -257,23 +293,32 @@ class CryptoWidget:
 
         self.last_alert_time = 0
         self.alert_cooldown = 300 
-        
-        # --- AI & SENTIMENT INIT ---
+        self.net_error_count = 0  
+        self.net_healthy = True
+        self.net_lock = threading.Lock() # Protect network counter mode:AGENT_MODE_EXECUTION        
         self.sentiment = sentiment_engine
         self.sentiment.start()
+        
+        # --- PHASE 11: AUTONOMOUS RELIABILITY ---
+        self.last_heartbeat = time.time()
+        self.watchdog_thread = threading.Thread(target=self.watchdog_loop, daemon=True)
+        self.watchdog_thread.start()
         
         self.ml_model = None
         if ML_AVAILABLE:
             self.ml_trainer = MLTrainer()
             if self.ml_trainer.load_model("trading_model.pkl"):
                 self.ml_model = self.ml_trainer
-                logger.info("🧠 ML Model Loaded Successfully")
+                # Set single thread for inference to avoid joblib warnings in loops
+                if hasattr(self.ml_model.model, 'n_jobs'):
+                    self.ml_model.model.n_jobs = 1
+                logger.info("🧠 ML Model Loaded Successfully (Inference Mode: Stable)")
             else:
                 logger.warning("ML Model not found. Train it using ml_trainer.py")
         
         self.setup_ui()
         
-        self.running = True
+        # Threads launched only after setup is ready
         self.analytics_thread = threading.Thread(target=self.analytics_loop, daemon=True)
         self.analytics_thread.start()
         self.ws_thread = threading.Thread(target=self.start_websocket, daemon=True)
@@ -289,8 +334,31 @@ class CryptoWidget:
             'obi': 1.0, 'atr': 0.0,
             'macd': {'hist': 0, 'line': 0, 'sig': 0},
             'bb': {'upper': 0, 'lower': 0, 'mid': 0},
-            'cvd': 0.0
+            'cvd': 0.0,
+            # --- PHASE 10: LIQUIDITY & MM ---
+            'liq_vol_1m': 0.0,
+            'vpin': 0.0,
+            'buy_vol_bucket': 0.0,
+            'sell_vol_bucket': 0.0,
+            'last_sweep': 'NONE',
+            'last_h_l_update': 0,
+            'last_analytic_fetch': 0
         }
+
+    def watchdog_loop(self):
+        """Monitor threads and ensure system health."""
+        while self.running:
+            time.sleep(60)
+            elapsed = time.time() - self.last_heartbeat
+            if elapsed > 120:  # If analytics_loop stalled for > 2 mins
+                logger.error(f"🚑 WATCHDOG: Analytics loop stalled (Last seen {elapsed:.0f}s ago). Attempting recovery...")
+                # We can't easily kill threads, but we can restart important ones if needed
+                # For now, we log it and try to force a heartbeat update to resume
+                # Real production bots might even trigger a restart of the process
+            
+            # Hourly health log
+            if int(time.time()) % 3600 < 60:
+                logger.info("💓 HEARTBEAT: Bot is alive and monitoring 8 pairs.")
 
     def setup_ui(self):
         self.main_container = tk.Frame(self.root, bg='#1a1a1a')
@@ -406,7 +474,7 @@ class CryptoWidget:
         elif "LOSS" in msg: color = "#ff00ea"
             
         self.log_list.itemconfig(0, fg=color)
-        if self.log_list.size() > 100: self.log_list.delete(100, tk.END)
+        if self.log_list.size() > 50: self.log_list.delete(50, tk.END)
         
         with open(self.log_file, "a") as f:
             f.write(f"{time.strftime('%Y-%m-%d')} {full_msg}\n")
@@ -477,8 +545,9 @@ class CryptoWidget:
                 logger.error(f"WebSocket Exception: {e}")
             
             if self.running:
-                logger.warning("WebSocket disconnected. Reconnecting in 5s...")
-                time.sleep(5)
+                delay = min(WEBSOCKET_CONFIG.get('reconnect_delay', 5) * 2, 60) # Simple backoff
+                logger.warning(f"WebSocket disconnected. Reconnecting in {delay}s...")
+                time.sleep(delay)
 
     def on_ws_message(self, ws, message):
         try:
@@ -490,7 +559,8 @@ class CryptoWidget:
                 symbol = data['s'].replace('USDT', '')
                 if symbol in self.data:
                     self.data[symbol]['mark'] = float(data['p'])
-                    self.root.after(0, self.update_price_ui, symbol)
+                    self.data[symbol]['funding'] = float(data['r'])  # Capture Funding Rate
+                    # Do NOT update price UI here to avoid flickering to Mark Price
             
             elif 'aggTrade' in stream:
                 symbol = data['s'].replace('USDT', '')
@@ -500,7 +570,18 @@ class CryptoWidget:
                     is_maker = data['m']
                     vol = price * qty
                     delta = vol if not is_maker else -vol
+                    self.data[symbol]['price'] = price # Official Ticker/Last Price sync
                     self.data[symbol]['cvd'] += delta 
+                    self.root.after(0, self.update_price_ui, symbol) 
+                    # VPIN Calculation (Flow Toxicity)
+                    if not is_maker: self.data[symbol]['buy_vol_bucket'] += vol
+                    else: self.data[symbol]['sell_vol_bucket'] += vol
+                    
+                    # Normalize VPIN every 1s (bucket reset happens in analytics_loop)
+                    buy = self.data[symbol]['buy_vol_bucket']
+                    sell = self.data[symbol]['sell_vol_bucket']
+                    if buy + sell > 0:
+                        self.data[symbol]['vpin'] = abs(buy - sell) / (buy + sell)
 
             elif 'forceOrder' in stream:
                 order = data['o']
@@ -510,12 +591,18 @@ class CryptoWidget:
                     qty = float(order['q'])
                     price = float(order['p'])
                     vol = qty * price
-                    if vol > 100000: # Increase threshold for Map
+                    
+                    # Accumulate for Liquidity Strategy
+                    self.data[symbol]['liq_vol_1m'] += vol
+                    
+                    # Visual Alerts for Massive Liquidations
+                    if vol > LIQUIDITY_CONFIG['liq_mass_threshold']:
+                        logger.warning(f"🔥 MASSIVE LIQUIDATION: {symbol} {side} ${vol/1000:.1f}k at {price}")
                         self.data[symbol]['last_liq'] = {'side': side, 'vol': vol, 'time': time.time()}
-                        # Add to Liq Map
+                        
+                        # Add to Liq Map for UI
                         self.liq_map[symbol].append({'price': price, 'vol': vol, 'side': side, 'time': time.time()})
-                        # Keep only last 5
-                        if len(self.liq_map[symbol]) > 5: self.liq_map[symbol].pop(0)
+                        if len(self.liq_map[symbol]) > 10: self.liq_map[symbol].pop(0)
 
         except json.JSONDecodeError as e:
             logger.debug(f"JSON parse error: {e}")
@@ -542,7 +629,7 @@ class CryptoWidget:
         try:
             # 1. 15m Klines (Main Indicators)
             req = urllib.request.Request(f"https://fapi.binance.com/fapi/v1/klines?symbol={symbol}USDT&interval=15m&limit=210", headers=headers)
-            with urllib.request.urlopen(req, timeout=2) as r:
+            with urllib.request.urlopen(req, timeout=5) as r:
                 klines_15 = json.loads(r.read().decode())
                 closes_15 = [float(k[4]) for k in klines_15]
                 highs_15 = [float(k[2]) for k in klines_15]
@@ -561,7 +648,7 @@ class CryptoWidget:
 
             # 2. 1h Klines (Trend Confirmation)
             req_1h = urllib.request.Request(f"https://fapi.binance.com/fapi/v1/klines?symbol={symbol}USDT&interval=1h&limit=210", headers=headers)
-            with urllib.request.urlopen(req_1h, timeout=2) as r:
+            with urllib.request.urlopen(req_1h, timeout=5) as r:
                 klines_1h = json.loads(r.read().decode())
                 closes_1h = [float(k[4]) for k in klines_1h]
                 d['ema200_1h'] = self.calculate_ema_value(closes_1h, 200)
@@ -569,18 +656,42 @@ class CryptoWidget:
 
             # 3. Order Book Depth (OBI) - Crucial for Scalping
             req_depth = urllib.request.Request(f"https://fapi.binance.com/fapi/v1/depth?symbol={symbol}USDT&limit=20", headers=headers)
-            with urllib.request.urlopen(req_depth, timeout=2) as r:
+            with urllib.request.urlopen(req_depth, timeout=5) as r:
                 depth = json.loads(r.read().decode())
                 b = sum([float(x[1]) for x in depth['bids']])
                 a = sum([float(x[1]) for x in depth['asks']])
                 d['obi'] = b / a if a > 0 else 1.0
 
+            # 4. Open Interest (Real-time Snapshot)
+            try:
+                req_oi = urllib.request.Request(f"https://fapi.binance.com/fapi/v1/openInterest?symbol={symbol}USDT", headers=headers)
+                with urllib.request.urlopen(req_oi, timeout=5) as r:
+                    oi_data = json.loads(r.read().decode())
+                    d['oi'] = float(oi_data.get('openInterest', 0))
+            except: d['oi'] = 0.0
+            
+            # Reset error count on successful fetch (Thread-safe)
+            with self.net_lock:
+                self.net_error_count = max(0, self.net_error_count - 1)
+                if self.net_error_count == 0:
+                    self.net_healthy = True 
+
+
         except urllib.error.URLError as e:
-            logger.warning(f"Network error fetching {symbol}: {e.reason}")
-        except json.JSONDecodeError as e:
-            logger.warning(f"JSON error for {symbol}: {e}")
+            with self.net_lock:
+                self.net_error_count += 1
+                self.net_healthy = False
+                
+                # If it's a DNS/Connection error, be extremely silent
+                is_dns = "11001" in str(e.reason) or "timed out" in str(e.reason).lower()
+                
+                if is_dns and self.net_error_count == 1:
+                    logger.error("📶 NETWORK DISCONNECTED: DNS/Timeout detected. Entering Silent Reconnection Mode...")
+                elif not is_dns and self.net_error_count <= 3:
+                    logger.warning(f"Network error fetching {symbol}: {e.reason}")
         except Exception as e:
-            logger.error(f"Error fetching analytics for {symbol}: {e}")
+            self.net_healthy = False
+            logger.debug(f"Fetch error: {e}")
 
     def calculate_ema_series(self, values, period):
         if len(values) < period: return [values[-1]] * len(values)
@@ -660,6 +771,10 @@ class CryptoWidget:
         return {'mid': sma, 'upper': sma + (sd*std_dev), 'lower': sma - (sd*std_dev)}
 
     def calculate_signal_score(self, d):
+        # PHASE 7: Schedule Filtering
+        if not self.is_within_trading_window():
+            return 0
+            
         """
         Multi-indicator scoring system.
         Returns score from -7 (strong SHORT) to +7 (strong LONG).
@@ -721,16 +836,14 @@ class CryptoWidget:
                 breakdown.append("Trend-2")
         
         # 2. STOCHRSI EXTREMES (+/-1 point)
-        # Oversold = bullish, Overbought = bearish
-        if d['stoch_rsi'] < 25:
+        if d['stoch_rsi'] < SCORING_CONFIG['stoch_oversold']:
             score += 1
             breakdown.append("Stoch+1")
-        elif d['stoch_rsi'] > 75:
+        elif d['stoch_rsi'] > SCORING_CONFIG['stoch_overbought']:
             score -= 1
             breakdown.append("Stoch-1")
         
         # 3. MACD HISTOGRAM (+/-1 point)
-        # Positive histogram = bullish momentum
         macd_hist = d['macd']['hist']
         if macd_hist > 0:
             score += 1
@@ -740,9 +853,8 @@ class CryptoWidget:
             breakdown.append("MACD-1")
         
         # 4. BOLLINGER BAND POSITION (+/-1 point)
-        # Below lower band = oversold (bullish), above upper = overbought (bearish)
         price = d['mark']
-        if d['bb']['lower'] > 0:  # Ensure BB is calculated
+        if d['bb']['lower'] > 0:  
             if price < d['bb']['lower']:
                 score += 1
                 breakdown.append("BB+1")
@@ -751,24 +863,48 @@ class CryptoWidget:
                 breakdown.append("BB-1")
         
         # 5. ORDER BOOK IMBALANCE (+/-1 point)
-        # More bids than asks = bullish
-        if d['obi'] > 1.15:
+        if d['obi'] > SCORING_CONFIG['obi_bullish']:
             score += 1
             breakdown.append("OBI+1")
-        elif d['obi'] < 0.85:
+        elif d['obi'] < SCORING_CONFIG['obi_bearish']:
             score -= 1
             breakdown.append("OBI-1")
         
         # 6. CVD MOMENTUM (+/-1 point)
-        # Positive CVD (net buying) = bullish
         cvd = d['cvd']
-        if cvd > 500000:  # Significant positive delta
+        if cvd > SCORING_CONFIG['cvd_threshold']:
             score += 1
             breakdown.append("CVD+1")
-        elif cvd < -500000:  # Significant negative delta
+        elif cvd < -SCORING_CONFIG['cvd_threshold']:
             score -= 1
             breakdown.append("CVD-1")
         
+        # --- PHASE 10: INSTITUTIONAL LIQUIDITY (MM) ---
+
+        # 1. Liquidation Exhaustion (Reversal Trap)
+        liq_1m = d.get('liq_vol_1m', 0)
+        if liq_1m > LIQUIDITY_CONFIG['liq_mass_threshold']:
+            last_l = d.get('last_liq', {})
+            if last_l.get('side') == 'SELL': 
+                 score -= 2 
+                 breakdown.append("LiqShort-2")
+            elif last_l.get('side') == 'BUY': 
+                 score += 2 
+                 breakdown.append("LiqLong+2")
+
+        # 2. VPIN / Flow Toxicity
+        if d.get('vpin', 0) > LIQUIDITY_CONFIG['vpin_threshold']:
+            if score > 0: score -= 1; breakdown.append("Toxic-1")
+            elif score < 0: score += 1; breakdown.append("Toxic+1")
+
+        # 3. Institutional Absorption (CVD Divergence)
+        if d['trend_15m'] == 'BEAR' and d['cvd'] > 200000:
+            score += 1
+            breakdown.append("Absorb+1")
+        elif d['trend_15m'] == 'BULL' and d['cvd'] < -200000:
+            score -= 1
+            breakdown.append("Absorb-1")
+
         # Store breakdown for display
         d['signal_breakdown'] = breakdown
         
@@ -780,11 +916,47 @@ class CryptoWidget:
             try:
                 curr = time.time()
                 if curr - last_fetch > 5:
+                    # Parallel fetching using ThreadPoolExecutor for 8 symbols
+                    with ThreadPoolExecutor(max_workers=8) as executor:
+                        executor.map(self.fetch_analytics, TRADING_CONFIG['symbols'])
+                    
+                    # MM & LIQUIDITY LOGIC: Apply decay and resets
                     for sym in TRADING_CONFIG['symbols']:
-                        self.fetch_analytics(sym)
-                        # CVD Decay: Prevent infinite accumulation bias
                         if sym in self.data:
-                             self.data[sym]['cvd'] *= 0.95
+                             d = self.data[sym]
+                             # 1. CVD Decay (Existing)
+                             d['cvd'] *= 0.95
+                             
+                             # 2. Liquidation Decay (30s window approx)
+                             # Since we run every 5s, 0.82 decay ~= 30s half-life
+                             d['liq_vol_1m'] *= 0.8 
+                             
+                             # 3. VPIN Bucket Reset (Keep 20% to smooth transitions)
+                             d['buy_vol_bucket'] *= 0.2
+                             d['sell_vol_bucket'] *= 0.2
+
+                             # 4. Background Scoring (Move from UI thread to here)
+                             score = self.calculate_signal_score(d)
+                             sent_val, _ = self.sentiment.get_sentiment()
+                             
+                             d['latest_features'] = {
+                                'rsi': d['rsi'], 'stoch_rsi': d['stoch_rsi'],
+                                'macd_hist': d['macd']['hist'], 'atr': d['atr'],
+                                'obi': d['obi'], 'cvd': d['cvd'],
+                                'vol_ratio': d['vol_ratio'], 'vpin': d.get('vpin', 0),
+                                'liq_vol': d.get('liq_vol_1m', 0), 'funding': d.get('funding', 0),
+                                'oi': d.get('oi', 0), 'sentiment': sent_val,
+                                'score': score  
+                             }
+                             d['latest_score'] = score
+
+                    # 5. DATA CLEANING & MEMORY MGMT (Every 5 mins approx)
+                    if int(curr) % 300 < 10:
+                        # Trim liq_map to keep only last 1 hour of levels
+                        for s in self.liq_map:
+                            self.liq_map[s] = [l for l in self.liq_map[s] if curr - l['time'] < 3600]
+                    
+                    self.last_heartbeat = curr
                     self.root.after(0, self.update_stats_ui)
                     last_fetch = curr
                 
@@ -835,13 +1007,13 @@ class CryptoWidget:
         # Color based on daily PnL
         if not self.trader.trading_enabled:
             col = "#ff00ff"  # Magenta = trading disabled
-            wallet_txt = f"🛑 LIMIT HIT | ${total_eq:,.2f}"
+            wallet_txt = f"🛑 LIMIT HIT | Equity: ${total_eq:,.2f}"
         elif daily >= 0:
             col = "#00ff00"
-            wallet_txt = f"Wallet: ${total_eq:,.2f} (Day: +${daily:.0f})"
+            wallet_txt = f"Equity: ${total_eq:,.2f} (Day: +${daily:.1f})"
         else:
             col = "#ffff00" if daily > -250 else "#ff4444"
-            wallet_txt = f"Wallet: ${total_eq:,.2f} (Day: -${abs(daily):.0f})"
+            wallet_txt = f"Equity: ${total_eq:,.2f} (Day: -${abs(daily):.1f})"
         
         self.wallet_lbl.configure(text=wallet_txt, fg=col)
         
@@ -888,8 +1060,9 @@ class CryptoWidget:
 
     def update_price_ui(self, symbol):
         lbl = getattr(self, f"{symbol}_price")
-        price = self.data[symbol]['mark']
-        lbl.configure(text=f"{symbol}: ${price:,.2f}")
+        price = self.data[symbol]['price']
+        dec = AVAILABLE_PAIRS.get(symbol, {}).get('decimals', 2)
+        lbl.configure(text=f"{symbol}: ${price:,.{dec}f}")
 
     def update_stats_ui(self):
         for sym in TRADING_CONFIG['symbols']:
@@ -897,18 +1070,21 @@ class CryptoWidget:
             
             lbl_stats = getattr(self, f"{sym}_stats")
             cvd = d['cvd'] / 1000000 
-            cvd_txt = f"{cvd:.1f}M"
+            vpin = d.get('vpin', 0)
             
-            # Liq Map Check (NEW)
+            # Color VPIN (Toxic flow warning)
+            vpin_col = ""
+            if vpin > LIQUIDITY_CONFIG['vpin_threshold']: vpin_col = "🔥"
+            
+            # Liq Map Check (Enhanced)
             price = d['mark']
             liq_txt = ""
             for l in self.liq_map[sym]:
-                # Check within 0.2%
                 if abs(price - l['price']) / price < 0.002:
                      lvl_type = "RESIST" if price < l['price'] else "SUP"
                      liq_txt = f" | ⚠️ LIQ {lvl_type}"
             
-            lbl_stats.configure(text=f"RSI:{d['rsi']:.1f} | Stoch:{d['stoch_rsi']:.1f} | CVD: {cvd_txt}{liq_txt}")
+            lbl_stats.configure(text=f"RSI:{d['rsi']:.1f} | CVD:{cvd:.1f}M | VPIN:{vpin:.2f}{vpin_col}{liq_txt}")
             
             trend_1h = d['trend_1h']
             trend_15m = d['trend_15m']
@@ -926,32 +1102,24 @@ class CryptoWidget:
             has_pos = any(p['symbol'] == sym for p in self.trader.positions)
 
             if not has_pos and atr > 0:
-                # Calculate multi-indicator score
-                score = self.calculate_signal_score(d)
+                # Use pre-calculated score and features from background thread
+                score = d.get('latest_score', 0)
+                features = d.get('latest_features', {})
                 
-                features = {
-                    'rsi': d['rsi'],
-                    'stoch_rsi': d['stoch_rsi'],
-                    'macd_hist': d['macd']['hist'],
-                    'atr': d['atr'],
-                    'obi': d['obi'],
-                    'cvd': d['cvd'],
-                    'trend_1h': 1 if trend_1h == 'BULL' else -1,
-                    'vol_ratio': d['vol_ratio'],
-                    'score': score  # NEW: Store score for analysis
-                }
+                # If background scoring hasn't run yet, skip
+                if not features: continue
                 
                 # Display current score
                 score_color = "#00ff00" if score > 0 else "#ff4444" if score < 0 else "#888888"
                 breakdown_txt = " ".join(d.get('signal_breakdown', []))
                 
-                # LONG SIGNAL: Score >= 4 (need at least 4 out of 7 bullish signals)
-                if score >= 4:
+                # LONG SIGNAL: Score threshold from config
+                if score >= SIGNAL_CONFIG['min_score_long']:
                     sig_txt = f"🔵 LONG [{score}/7]"
                     sig_col = "#00ff00"
                     
-                    sl = price - (1.5 * atr)
-                    tp = price + (2.5 * atr)
+                    sl = price - (SIGNAL_CONFIG['atr_sl_multiplier'] * atr)
+                    tp = price + (SIGNAL_CONFIG['atr_tp_multiplier'] * atr)
                     tgt_txt = f"TP: ${tp:,.2f} | SL: ${sl:,.2f}"
                     
                     self.trigger_alert()
@@ -963,13 +1131,13 @@ class CryptoWidget:
                         if telegram:
                             telegram.send_signal(sym, 'BUY', price, tp, sl, score)
 
-                # SHORT SIGNAL: Score <= -4 (need at least 4 out of 7 bearish signals)
-                elif score <= -4:
+                # SHORT SIGNAL: Score threshold from config
+                elif score <= SIGNAL_CONFIG['min_score_short']:
                     sig_txt = f"🔴 SHORT [{score}/7]"
                     sig_col = "#ff4444"
                     
-                    sl = price + (1.5 * atr)
-                    tp = price - (2.5 * atr)
+                    sl = price + (SIGNAL_CONFIG['atr_sl_multiplier'] * atr)
+                    tp = price - (SIGNAL_CONFIG['atr_tp_multiplier'] * atr)
                     tgt_txt = f"TP: ${tp:,.2f} | SL: ${sl:,.2f}"
                     
                     self.trigger_alert()
@@ -983,8 +1151,13 @@ class CryptoWidget:
                 
                 # NEUTRAL: Show current score while scanning
                 else:
-                    sig_txt = f"SCAN [{score:+d}]"
-                    sig_col = score_color
+                    if not self.is_within_trading_window():
+                        sig_txt = "OFF-SESSION"
+                        sig_col = "#666666"
+                    else:
+                        sig_txt = f"SCAN [{score:+d}]"
+                        sig_col = score_color
+                    
                     if abs(score) >= 2:  # Show breakdown if close to signal
                         tgt_txt = breakdown_txt
             
@@ -1000,7 +1173,8 @@ class CryptoWidget:
                 
                 sig_txt = f"ACTIVE {level_txt}" if level > 0 else "ACTIVE"
                 sig_col = col
-                tgt_txt = f"PnL: ${pnl:.2f} | SL: ${pos['sl']:,.0f}"
+                # Show Notional Size and Margin used
+                tgt_txt = f"PnL: ${pnl:.2f} | Size: ${pos['notional']:,.0f} | Margin: ${pos['margin']:.1f}"
                 lbl_tgt.configure(text=tgt_txt, fg=col)
 
             elif sig_txt == "SCANNING...":
@@ -1008,18 +1182,52 @@ class CryptoWidget:
 
             lbl_sig.configure(text=sig_txt, fg=sig_col)
             
+        # Refresh wallet with real-time unrealized PnL
+        self.update_wallet_ui()
+            
         # Update System Status Heartbeat + AI SENTIMENT
         now_ts = time.strftime('%H:%M:%S')
         sent_score, _ = self.sentiment.get_sentiment()
         sent_txt = "BULLISH 🚀" if sent_score > 0.3 else "BEARISH 📉" if sent_score < -0.3 else "NEUTRAL ⚖️"
         
-        self.status_label.configure(text=f"⚡ ACTIVE | {now_ts} | Sentiment: {sent_txt} ({sent_score:+.2f})", fg='#00ff00')
+        if not self.net_healthy:
+            status_txt = f"📶 RECONNECTING... | {now_ts} | Network issues detected"
+            status_col = "#ffcc00" # Warning yellow
+        else:
+            status_txt = f"⚡ ACTIVE | {now_ts} | Sentiment: {sent_txt} ({sent_score:+.2f})"
+            status_col = "#00ff00"
+            
+        self.status_label.configure(text=status_txt, fg=status_col)
 
     def trigger_alert(self):
         t = time.time()
         if t - self.last_alert_time > self.alert_cooldown:
             winsound.PlaySound("SystemAsterisk", winsound.SND_ALIAS | winsound.SND_ASYNC)
             self.last_alert_time = t
+
+    def is_within_trading_window(self):
+        """Checks if current time is within allowed trading sessions."""
+        if not SCHEDULE_CONFIG.get('enabled', False):
+            return True
+            
+        now = datetime.now(timezone.utc).time() if SCHEDULE_CONFIG.get('timezone') == 'UTC' else datetime.now().time()
+        
+        for window in SCHEDULE_CONFIG.get('windows', []):
+            try:
+                start_str = window.get('start', '00:00')
+                end_str = window.get('end', '00:00')
+                start = datetime.strptime(start_str, "%H:%M").time()
+                end = datetime.strptime(end_str, "%H:%M").time()
+                
+                # Handle overnight windows (e.g., 22:00 to 04:00)
+                if start <= end:
+                    if start <= now <= end: return True
+                else:
+                    if now >= start or now <= end: return True
+            except Exception as e:
+                logger.error(f"Error parsing trading window {window}: {e}")
+                
+        return False
 
     def start_move(self, event):
         self.x = event.x
@@ -1033,6 +1241,14 @@ class CryptoWidget:
 if __name__ == "__main__":
     logger.info("="*50)
     logger.info("🚀 SNIPER BOT PRO - Starting...")
+    
+    # AGGRESSIVE RISK WARNING
+    risk_pct = TRADING_CONFIG.get('risk_per_trade', 0.01) * 100
+    if risk_pct >= 20:
+        logger.warning(f"⚠️ AGGRESSIVE RISK: {risk_pct}% per trade!")
+        logger.warning("   Max simultaneous trades: " + str(TRADING_CONFIG.get('max_active_trades', 5)))
+        logger.warning("   Proceed with caution.")
+        
     logger.info("="*50)
     
     # Send Telegram startup notification

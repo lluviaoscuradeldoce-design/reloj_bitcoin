@@ -4,11 +4,23 @@ Configuration file for Sniper Bot Pro.
 Edit these values to customize bot behavior.
 """
 
+# ============ TRADING SCHEDULE (PHASE 7) ============
+SCHEDULE_CONFIG = {
+    'enabled': True,                     # Restrict trading to specific hours
+    'windows': [
+        {'start': '13:00', 'end': '21:00'}, # NY Session (approx UTC)
+        {'start': '07:00', 'end': '16:00'}, # London Session (approx UTC)
+    ],
+    'timezone': 'UTC'                    # Reference timezone
+}
+
 # ============ TRADING CONFIGURATION ============
 TRADING_CONFIG = {
     'symbols': ['BTC', 'ETH', 'SOL', 'BNB', 'XRP', 'DOGE', 'ADA', 'AVAX'],
-    'risk_per_trade': 0.025,             # 2.5% risk (Conservative Mode)
-    'daily_loss_limit': -20.0,           # Max daily loss in USD (20% of $100)
+    'risk_per_trade': 0.5,               # 50% risk (AGGRESSIVE MODE)
+    'max_leverage': 10,                  # Max 10x leverage cap
+    'max_active_trades': 2,              # Limit concurrent exposure
+    'daily_loss_limit': -50.0,           # Max daily loss in USD ($50)
     'signal_cooldown': 300,              # 5 minutes between signals
     'alert_cooldown': 300,               # 5 minutes between sound alerts
 }
@@ -19,6 +31,15 @@ SIGNAL_CONFIG = {
     'min_score_short': -5,               # Stricter: Requires Trend Alignment
     'atr_sl_multiplier': 2.0,            # ATR multiplier for Stop Loss (Optimized)
     'atr_tp_multiplier': 3.0,            # ATR multiplier for Take Profit (Optimized)
+}
+
+# ============ LIQUIDITY & MM STRATEGY (PHASE 10) ============
+LIQUIDITY_CONFIG = {
+    'vpin_threshold': 0.75,              # Flow Toxicity: >0.75 indicates MM withdrawal
+    'liq_mass_threshold': 150000,        # Min USD volume to consider "Massive Liquidation"
+    'liq_exhaustion_time': 30,           # Seconds to track liquidation clusters
+    'abs_cvd_threshold': 0.8,            # 80% absorption ratio (Price vs CVD)
+    'sweep_lookback': 20,                # Candles to look back for Liquidity Sweep
 }
 
 # ============ TRAILING STOP LEVELS ============

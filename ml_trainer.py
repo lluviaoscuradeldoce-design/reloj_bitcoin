@@ -25,6 +25,8 @@ try:
     from sklearn.model_selection import train_test_split, cross_val_score
     from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
     from sklearn.preprocessing import StandardScaler
+    import warnings
+    warnings.filterwarnings("ignore", category=UserWarning, module="sklearn")
     ML_AVAILABLE = True
 except ImportError:
     ML_AVAILABLE = False
@@ -40,7 +42,8 @@ class MLTrainer:
         self.scaler = StandardScaler() if ML_AVAILABLE else None
         self.feature_columns = [
             'rsi', 'stoch_rsi', 'macd_hist', 'atr', 
-            'bb_position', 'trend', 'vol_ratio'
+            'obi', 'cvd', 'vol_ratio', 'vpin', 'liq_vol', 
+            'funding', 'oi', 'sentiment', 'score'
         ]
     
     def load_data(self) -> tuple:
@@ -51,7 +54,7 @@ class MLTrainer:
                 self.data_file = "training_data.csv"
                 self.feature_columns = [
                     'rsi', 'stoch_rsi', 'macd_hist', 'atr', 
-                    'obi', 'trend_1h', 'vol_ratio'
+                    'obi', 'cvd', 'vol_ratio', 'vpin', 'liq_vol', 'trend_1h'
                 ]
             else:
                 print(f"⚠️ Data file not found: {self.data_file}")

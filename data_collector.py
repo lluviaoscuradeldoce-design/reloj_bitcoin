@@ -180,6 +180,11 @@ class DataCollector:
                 'bb_position': bb_position,
                 'trend': trend,
                 'vol_ratio': round(vol_ratio, 2),
+                'obi': 1.0,           # Placeholder for historical data
+                'cvd': 0.0,           # Placeholder
+                'vpin': 0.0,          # Placeholder
+                'liq_vol': 0.0,       # Placeholder
+                'trend_1h': trend,    # Matching format
                 'future_return': round(future_return, 4),
                 'label': label
             }

@@ -18,7 +18,12 @@ class SentimentEngine:
         self.rss_sources = [
             "https://cointelegraph.com/rss",
             "https://www.coindesk.com/arc/outboundfeeds/rss/",
-            "https://cryptopotato.com/feed/"
+            "https://cryptopotato.com/feed/",
+            "https://decrypt.co/feed",
+            "https://www.newsbtc.com/feed/",
+            "https://bitcoinmagazine.com/feed/",
+            "https://www.theblock.co/rss.xml",
+            "https://cryptonews.com/news/feed/"
         ]
         
         # Rigorous Financial Lexicon (Weighted)
@@ -28,13 +33,15 @@ class SentimentEngine:
             'adoption': 2, 'approved': 3, 'etf': 2, 'launch': 1, 'partnership': 2,
             'gain': 1, 'rally': 2, 'soar': 2, 'breakout': 2, 'upgrade': 1,
             'accumulate': 1, 'buy': 1, 'support': 1, 'long': 1, 'growth': 1,
-            'regulatory approval': 3, 'institutional': 2, 'stimulus': 2,
+            'halving': 2, 'rocket': 3, 'whale': 1, 'pump': 2, 'moon': 2, 'listing': 2,
+            'institutional': 2, 'stimulus': 2, 'whale buy': 3,
             
             # BEARISH (-1 to -3)
             'crash': -3, 'slump': -2, 'bear': -2, 'bearish': -2, 'plunge': -2,
             'ban': -3, 'regulation': -1, 'lawsuit': -2, 'hack': -3, 'scam': -2,
             'sec': -1, 'sell-off': -2, 'drop': -1, 'low': -1, 'resistance': -1,
             'liquidated': -1, 'down': -1, 'collapse': -3, 'fail': -2, 'risk': -1,
+            'dump': -2, 'fud': -2, 'outflow': -1, 'whale sell': -3, 'short': -1,
             'inflation': -1, 'recession': -2, 'warning': -1, 'investigation': -2
         }
 
@@ -68,10 +75,15 @@ class SentimentEngine:
         total_score = 0
         article_count = 0
         headlines = []
-        
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+            'Accept': 'application/rss+xml, application/xml, text/xml',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Cache-Control': 'no-cache'
+        }
 
         for url in self.rss_sources:
+            time.sleep(1) # Be gentle to avoid connection resets
             try:
                 req = urllib.request.Request(url, headers=headers)
                 with urllib.request.urlopen(req, timeout=10) as response:
@@ -79,7 +91,7 @@ class SentimentEngine:
                     root = ET.fromstring(xml_data)
                     
                     # Parse standard RSS items
-                    for item in root.findall('.//item')[:10]: # Analyze top 10 per feed
+                    for item in root.findall('.//item')[:20]: # Deeper scan per feed
                         title = item.find('title').text
                         if title:
                             score = self._score_text(title)
@@ -87,7 +99,10 @@ class SentimentEngine:
                             article_count += 1
                             headlines.append({'title': title, 'score': score})
             except Exception as e:
-                logger.warning(f"Error fetching RSS {url}: {e}")
+                if "10054" in str(e):
+                    logger.warning(f"⚠️ Source {url.split('/')[2]} is busy (Connection Reset). Skipping...")
+                else:
+                    logger.warning(f"Error fetching RSS {url}: {e}")
 
         # Normalize score
         # Assumes extreme market sentiment ~ +/- 20 total points from ~30 headlines represents strong bias
@@ -104,6 +119,12 @@ class SentimentEngine:
             self.last_update = time.time()
             
         logger.info(f"📊 Market Sentiment Updated: {self.sentiment_score:.2f} based on {article_count} articles.")
+        if headlines:
+            # Sort by absolute score to show most impactful news
+            impactful = sorted(headlines, key=lambda x: abs(x['score']), reverse=True)[:3]
+            for h in impactful:
+                if h['score'] != 0:
+                    logger.info(f"   📰 [{h['score']:+d}] {h['title'][:70]}...")
 
     def _score_text(self, text):
         """Calculates a score for a text based on the weighted lexicon."""
