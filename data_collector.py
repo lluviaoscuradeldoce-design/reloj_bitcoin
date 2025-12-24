@@ -25,20 +25,23 @@ class DataCollector:
     """Collects and processes historical market data for ML training."""
     
     def __init__(self, symbols: list = None):
-        self.symbols = symbols or ['BTC', 'ETH']
+        self.symbols = symbols or ['BTC', 'ETH', 'SOL', 'BNB', 'XRP', 'DOGE', 'ADA', 'AVAX']
         self.base_url = "https://fapi.binance.com/fapi/v1"
         self.headers = {'User-Agent': 'Mozilla/5.0'}
         
-    def fetch_klines(self, symbol: str, interval: str = '15m', limit: int = 1000) -> list:
+    def fetch_klines(self, symbol: str, interval: str = '15m', limit: int = 1500, start_time: int = None) -> list:
         """Fetch historical klines from Binance."""
         url = f"{self.base_url}/klines?symbol={symbol}USDT&interval={interval}&limit={limit}"
+        if start_time:
+            url += f"&startTime={start_time}"
+            
         req = urllib.request.Request(url, headers=self.headers)
         
         try:
             with urllib.request.urlopen(req, timeout=30) as response:
                 return json.loads(response.read().decode())
         except Exception as e:
-            print(f"Error fetching {symbol}: {e}")
+            print(f"   ⚠️ Error fetching {symbol}: {e}")
             return []
     
     def calculate_rsi(self, closes: list, period: int = 14) -> float:
@@ -170,46 +173,64 @@ class DataCollector:
             label = 1 if future_return > 0.1 else 0
             
             record = {
-                'timestamp': klines[i][0],
                 'symbol': symbol,
-                'price': price,
+                'side': 'BUY' if label == 1 else 'SELL',
                 'rsi': round(rsi, 2),
                 'stoch_rsi': round(stoch_rsi, 2),
                 'macd_hist': round(macd['hist'], 6),
                 'atr': round(atr, 2),
-                'bb_position': bb_position,
-                'trend': trend,
-                'vol_ratio': round(vol_ratio, 2),
-                'obi': 1.0,           # Placeholder for historical data
+                'obi': 1.0,           # Placeholder
                 'cvd': 0.0,           # Placeholder
+                'vol_ratio': round(vol_ratio, 2),
                 'vpin': 0.0,          # Placeholder
                 'liq_vol': 0.0,       # Placeholder
-                'trend_1h': trend,    # Matching format
-                'future_return': round(future_return, 4),
-                'label': label
+                'funding': 0.0,       # Placeholder
+                'oi': 0,              # Placeholder
+                'sentiment': 0.0,      # Placeholder
+                'score': 0,           # Placeholder for historical
+                'outcome': label,     # outcome for analyzer
+                'pnl_percent': future_return
             }
             records.append(record)
         
         return records
     
-    def collect_data(self, days: int = 30) -> list:
-        """Collect data for all symbols."""
+    def collect_data(self, days: int = 365) -> list:
+        """Collect data for all symbols using time loops for deep history."""
         all_records = []
+        now_ms = int(time.time() * 1000)
+        start_ms = now_ms - (days * 24 * 60 * 60 * 1000)
         
         for symbol in self.symbols:
-            print(f"📊 Collecting data for {symbol}...")
+            print(f"📊 Collecting deep history for {symbol} ({days} days)...")
+            symbol_klines = []
+            current_start = start_ms
             
-            # Fetch 15m klines (max 1000 per request = ~10 days)
-            # For more days, we need multiple requests
-            klines = self.fetch_klines(symbol, interval='15m', limit=1000)
-            
-            if klines:
-                records = self.process_klines(klines, symbol)
+            while current_start < now_ms:
+                batch = self.fetch_klines(symbol, interval='15m', limit=1500, start_time=current_start)
+                if not batch: break
+                
+                symbol_klines.extend(batch)
+                
+                # Check if we have reached now (buffer of 15m)
+                last_ts = batch[-1][0]
+                if last_ts >= now_ms - (15 * 60 * 1000):
+                    break
+                    
+                if last_ts <= current_start: break # Prevent infinite loops
+                
+                current_start = last_ts + 1
+                
+                print(f"   📥 Batched {len(symbol_klines)} candles...", end='\r')
+                time.sleep(0.5) # Protection for deep history
+                
+            if symbol_klines:
+                # Deduplicate and sort
+                symbol_klines = sorted({tuple(k[0:6]): k for k in symbol_klines}.values(), key=lambda x: x[0])
+                records = self.process_klines(symbol_klines, symbol)
                 all_records.extend(records)
-                print(f"   ✅ Collected {len(records)} data points for {symbol}")
+                print(f"\n   ✅ Processed {len(records)} training points for {symbol}")
             
-            time.sleep(0.5)  # Rate limiting
-        
         return all_records
     
     def save_to_csv(self, records: list, filename: str = "ml_training_data.csv"):
@@ -238,7 +259,7 @@ class DataCollector:
         
         # Print summary
         if records:
-            labels = [r['label'] for r in records]
+            labels = [r['outcome'] for r in records]
             positive = sum(labels)
             print(f"\n📊 Dataset Summary:")
             print(f"   Total samples: {len(records)}")
@@ -249,8 +270,8 @@ class DataCollector:
 def main():
     import sys
     
-    days = 30
-    symbols = ['BTC', 'ETH']
+    days = 365
+    symbols = ['BTC', 'ETH', 'SOL', 'BNB', 'XRP', 'DOGE', 'ADA', 'AVAX']
     
     # Parse command line args
     if '--days' in sys.argv:

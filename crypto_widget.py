@@ -113,22 +113,23 @@ class PaperTrader:
         
         size_qty = risk_amt / dist
         
-        # Leverage Cap (e.g., max 10x)
+        # Leverage Cap (e.g., max 10x) per allocated margin
         max_lev = TRADING_CONFIG.get('max_leverage', 10)
-        max_notional = self.balance * max_lev
+        max_notional = risk_amt * max_lev  # Cap based on trade's own margin share
         notional = size_qty * entry_price
         
         if notional > max_notional:
             size_qty = max_notional / entry_price
-            logger.info(f"⚡ LEVERAGE CAP: Position resized to {max_lev}x leverage.")
+            notional = max_notional # Update notional to the capped value
+            logger.info(f"⚡ LEVERAGE CAP: Position resized to {max_lev}x leverage (${notional:,.0f} notional).")
         
         trade = {
             'symbol': symbol,
             'side': side,
             'entry': entry_price,
             'size': size_qty,
-            'margin': risk_amt,        # Margin used
-            'notional': notional,      # Total position size
+            'margin': notional / max_lev, # Actual margin (should match risk_amt or less if capped)
+            'notional': notional,         # Corrected Total position size
             'sl': sl,
             'tp': tp,
             'original_sl': sl,  # Keep original for reference
@@ -226,9 +227,11 @@ class PaperTrader:
                 if self.daily_pnl <= self.daily_loss_limit:
                     self.trading_enabled = False
                 
+                
                 self.history.append(p)
                 closed.append(p)
                 self.save_to_dataset(p, hit_tp or pnl > 0)
+                
         
         for c in closed:
             self.positions.remove(c)
@@ -534,7 +537,7 @@ class CryptoWidget:
                     url,
                     on_message=self.on_ws_message,
                     on_error=self.on_ws_error,
-                    on_open=lambda w: logger.info("✅ WebSocket Connected"),
+                    on_open=lambda w: [logger.info("✅ WebSocket Connected (Stable Mode)"), setattr(self, 'reconnect_attempts', 0)],
                     on_close=lambda w, c, m: logger.warning(f"WebSocket Closed: {c} - {m}")
                 )
                 ws.run_forever(
@@ -545,8 +548,13 @@ class CryptoWidget:
                 logger.error(f"WebSocket Exception: {e}")
             
             if self.running:
-                delay = min(WEBSOCKET_CONFIG.get('reconnect_delay', 5) * 2, 60) # Simple backoff
-                logger.warning(f"WebSocket disconnected. Reconnecting in {delay}s...")
+                # --- STABILITY: Exponential Backoff Strategy (Phase 18) ---
+                self.reconnect_attempts += 1
+                base_delay = WEBSOCKET_CONFIG.get('reconnect_delay', 5)
+                # Cap max delay at 60s, formula: base * (1.5 ^ attempts)
+                delay = min(60, base_delay * (1.5 ** (self.reconnect_attempts - 1)))
+                
+                logger.warning(f"🔄 Connection Lost. Attempt {self.reconnect_attempts}: Reconnecting in {delay:.1f}s...")
                 time.sleep(delay)
 
     def on_ws_message(self, ws, message):
@@ -582,6 +590,18 @@ class CryptoWidget:
                     sell = self.data[symbol]['sell_vol_bucket']
                     if buy + sell > 0:
                         self.data[symbol]['vpin'] = abs(buy - sell) / (buy + sell)
+                        
+                    # --- FAST PATH: Real-time PnL Update (Phase 17) ---
+                    # Direct UI update on every trade tick
+                    for p in self.trader.positions:
+                       if p['symbol'] == symbol:
+                           if p['side'] == 'BUY':
+                               curr_pnl = (price - p['entry']) * p['size']
+                           else:
+                               curr_pnl = (p['entry'] - price) * p['size']
+                           
+                           p['pnl'] = curr_pnl
+                           self.root.after(0, self.fast_update_ui, symbol, curr_pnl, p)
 
             elif 'forceOrder' in stream:
                 order = data['o']
@@ -771,8 +791,9 @@ class CryptoWidget:
         return {'mid': sma, 'upper': sma + (sd*std_dev), 'lower': sma - (sd*std_dev)}
 
     def calculate_signal_score(self, d):
-        # PHASE 7: Schedule Filtering
-        if not self.is_within_trading_window():
+        # PHASE 7: Schedule Filtering (Adaptive)
+        symbol = d.get('symbol')
+        if not self.is_within_trading_window(symbol):
             return 0
             
         """
@@ -796,7 +817,7 @@ class CryptoWidget:
                 breakdown.append("News(Bear)-1")
         except: pass
 
-        # 2. Machine Learning Validation
+        # 2. Machine Learning Validation (STRICT)
         if self.ml_model:
             try:
                 trend_val = 1 if d['trend_15m'] == 'BULL' else 0
@@ -813,8 +834,9 @@ class CryptoWidget:
                 }
                 
                 pred = self.ml_model.predict(features)
-                if pred['confidence'] > 60:
-                    pts = 2 if pred['confidence'] > 80 else 1
+                # INCREASED CONFIDENCE: Requires 75% instead of 60%
+                if pred['confidence'] > 75:
+                    pts = 3 if pred['confidence'] > 85 else 2
                     if pred['direction'] == 'UP':
                         score += pts
                         breakdown.append(f"AI(Up)+{pts}")
@@ -824,6 +846,14 @@ class CryptoWidget:
             except Exception: pass
         
         # --- TECHNICAL INDICATORS ---
+        
+        # MANDATORY TREND-LOCK: Signal must align with 1H Trend
+        # This prevents "Super Intelligence" mistakes against the macro flow
+        trend_1h = d.get('trend_1h', 'FLAT')
+        if score > 0 and trend_1h != 'BULL':
+            return 0  # Block Longs if trend is BEAR/FLAT
+        if score < 0 and trend_1h != 'BEAR':
+            return 0  # Block Shorts if trend is BULL/FLAT
         
         # 1. TREND ALIGNMENT (+/-2 points)
         # Both timeframes aligned = strong signal
@@ -968,6 +998,8 @@ class CryptoWidget:
                 
                 closed_trades = self.trader.update(prices)
                 if closed_trades:
+                    # ATOMIC WALLET SYNC (Correct Location)
+                    self.root.after(0, self.update_wallet_ui)
                     for t in closed_trades:
                         pnl_txt = f"{'+' if t['pnl'] > 0 else ''}${t['pnl']:.2f}"
                         msg = "WIN" if t['pnl'] > 0 else "LOSS"
@@ -1199,17 +1231,44 @@ class CryptoWidget:
             
         self.status_label.configure(text=status_txt, fg=status_col)
 
+    def fast_update_ui(self, symbol, pnl, pos):
+        """Lightweight UI update triggered directly by WebSocket tick."""
+        try:
+            lbl_tgt = getattr(self, f"{symbol}_tgt")
+            col = "#00ff00" if pnl > 0 else "#ff4444"
+            
+            # Show Trailing Level with emoji
+            level = pos.get('trailing_level', 0)
+            level_icons = {0: "", 1: "⚡BE", 2: "🔒25%", 3: "🎯TRAIL"}
+            level_txt = level_icons.get(level, "")
+            
+            # Show Notional Size and Margin used
+            tgt_txt = f"PnL: ${pnl:.2f} | Size: ${pos['notional']:,.0f} | Margin: ${pos['margin']:.1f}"
+            lbl_tgt.configure(text=tgt_txt, fg=col)
+        except AttributeError:
+             pass # Widget might not be initialized yet
+
     def trigger_alert(self):
         t = time.time()
         if t - self.last_alert_time > self.alert_cooldown:
             winsound.PlaySound("SystemAsterisk", winsound.SND_ALIAS | winsound.SND_ASYNC)
             self.last_alert_time = t
 
-    def is_within_trading_window(self):
-        """Checks if current time is within allowed trading sessions."""
+    def is_within_trading_window(self, symbol=None):
+        """
+        Checks if current time is within config windows OR if market is highly volatile/active.
+        Allows 24/7 adaptive optimization.
+        """
         if not SCHEDULE_CONFIG.get('enabled', False):
             return True
             
+        # 24/7 ADAPTIVE BYPASS: If market is moving (High ATR), we trade anyway
+        if symbol and symbol in self.data:
+            state = self.data[symbol]
+            # If ATR > 0.3% of price, market is definitely active enough
+            if state.get('atr', 0) > (state.get('price', 0) * 0.003):
+                return True
+
         now = datetime.now(timezone.utc).time() if SCHEDULE_CONFIG.get('timezone') == 'UTC' else datetime.now().time()
         
         for window in SCHEDULE_CONFIG.get('windows', []):

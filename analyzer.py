@@ -35,20 +35,23 @@ class TradingAnalyzer:
             self.trades = list(reader)
         
         # Convert numeric fields
+        valid_trades = []
         for t in self.trades:
             try:
-                t['rsi'] = float(t.get('rsi', 50))
-                t['stoch_rsi'] = float(t.get('stoch_rsi', 50))
-                t['macd_hist'] = float(t.get('macd_hist', 0))
-                t['atr'] = float(t.get('atr', 0))
-                t['obi'] = float(t.get('obi', 1))
-                t['cvd'] = float(t.get('cvd', 0))
-                t['vol_ratio'] = float(t.get('vol_ratio', 1))
-                t['score'] = int(t.get('score', 0)) if t.get('score') else 0
-                t['outcome'] = int(t.get('outcome', 0))
-                t['pnl_percent'] = float(t.get('pnl_percent', 0))
-            except (ValueError, KeyError):
-                pass
+                t['rsi'] = float(t.get('rsi', 50) or 50)
+                t['stoch_rsi'] = float(t.get('stoch_rsi', 50) or 50)
+                t['macd_hist'] = float(t.get('macd_hist', 0) or 0)
+                t['atr'] = float(t.get('atr', 0) or 0)
+                t['obi'] = float(t.get('obi', 1) or 1)
+                t['cvd'] = float(t.get('cvd', 0) or 0)
+                t['vol_ratio'] = float(t.get('vol_ratio', 1) or 1)
+                t['score'] = int(t.get('score', 0) or 0)
+                t['outcome'] = int(t.get('outcome', 0) or 0)
+                t['pnl_percent'] = float(t.get('pnl_percent', 0) or 0)
+                valid_trades.append(t)
+            except (ValueError, TypeError):
+                continue
+        self.trades = valid_trades
         
         print(f"✅ Loaded {len(self.trades)} trades from {self.csv_file}")
     

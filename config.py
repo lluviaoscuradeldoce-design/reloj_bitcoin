@@ -7,19 +7,20 @@ Edit these values to customize bot behavior.
 # ============ TRADING SCHEDULE (PHASE 7) ============
 SCHEDULE_CONFIG = {
     'enabled': True,                     # Restrict trading to specific hours
+    'timezone': 'UTC',                   # Reference timezone
     'windows': [
-        {'start': '13:00', 'end': '21:00'}, # NY Session (approx UTC)
-        {'start': '07:00', 'end': '16:00'}, # London Session (approx UTC)
-    ],
-    'timezone': 'UTC'                    # Reference timezone
+        {'name': 'London', 'start': '07:00', 'end': '16:00'},
+        {'name': 'New York', 'start': '13:30', 'end': '21:00'},
+        {'name': 'Tokyo/Sydney', 'start': '23:00', 'end': '08:00'} # Asian Session
+    ]
 }
 
 # ============ TRADING CONFIGURATION ============
 TRADING_CONFIG = {
     'symbols': ['BTC', 'ETH', 'SOL', 'BNB', 'XRP', 'DOGE', 'ADA', 'AVAX'],
-    'risk_per_trade': 0.5,               # 50% risk (AGGRESSIVE MODE)
+    'risk_per_trade': 0.33,               # 33% Risk: Target ~$33 position size
     'max_leverage': 10,                  # Max 10x leverage cap
-    'max_active_trades': 2,              # Limit concurrent exposure
+    'max_active_trades': 3,              # Allow 3 simultaneous trades (Diversification)
     'daily_loss_limit': -50.0,           # Max daily loss in USD ($50)
     'signal_cooldown': 300,              # 5 minutes between signals
     'alert_cooldown': 300,               # 5 minutes between sound alerts
@@ -27,10 +28,10 @@ TRADING_CONFIG = {
 
 # ============ SIGNAL THRESHOLDS ============
 SIGNAL_CONFIG = {
-    'min_score_long': 5,                 # Stricter: Requires Trend Alignment
-    'min_score_short': -5,               # Stricter: Requires Trend Alignment
-    'atr_sl_multiplier': 2.0,            # ATR multiplier for Stop Loss (Optimized)
-    'atr_tp_multiplier': 3.0,            # ATR multiplier for Take Profit (Optimized)
+    'min_score_long': 5,                 # Balanced: High frequency + Trend Filter
+    'min_score_short': -5,               # Balanced: High frequency + Trend Filter
+    'atr_sl_multiplier': 1.5,            # Tighter SL for scalping
+    'atr_tp_multiplier': 1.2,            # Fast TP for "Small Gains" accumulation
 }
 
 # ============ LIQUIDITY & MM STRATEGY (PHASE 10) ============
@@ -44,11 +45,11 @@ LIQUIDITY_CONFIG = {
 
 # ============ TRAILING STOP LEVELS ============
 TRAILING_CONFIG = {
-    'level_1_activation': 0.3,           # ATR profit to activate Break Even
-    'level_2_activation': 1.0,           # ATR profit to lock 25%
-    'level_2_lock_percent': 0.25,        # Percentage of profit to lock
-    'level_3_activation': 1.5,           # ATR profit to start trailing
-    'level_3_trail_atr': 0.5,            # ATR distance for trailing
+    'level_1_activation': 0.2,           # ATR profit to activate Break Even (Fast!)
+    'level_2_activation': 0.6,           # ATR profit to lock 25%
+    'level_2_lock_percent': 0.30,        # Lock more profit earlier
+    'level_3_activation': 0.9,           # ATR profit to start trailing
+    'level_3_trail_atr': 0.3,            # Tighter trailing for micro-wins
 }
 
 # ============ INDICATOR SETTINGS ============
@@ -88,10 +89,11 @@ UI_CONFIG = {
 }
 
 # ============ WEBSOCKET CONFIGURATION ============
+# ============ WEBSOCKET CONFIGURATION ============
 WEBSOCKET_CONFIG = {
-    'ping_interval': 60,
-    'ping_timeout': 30,
-    'reconnect_delay': 5,
+    'ping_interval': 180,       # Relaxed: 3 minutes (was 60s) to tolerate lag
+    'ping_timeout': 60,         # Relaxed: 60s (was 30s) for slow responses
+    'reconnect_delay': 5,       # Initial backoff (will be exponential)
 }
 
 # ============ TELEGRAM NOTIFICATIONS ============

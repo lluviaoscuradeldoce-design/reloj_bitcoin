@@ -21,16 +21,17 @@ from datetime import datetime
 # Check for ML libraries
 try:
     import numpy as np
-    from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
-    from sklearn.model_selection import train_test_split, cross_val_score
-    from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
+    import pandas as pd
+    from xgboost import XGBClassifier
+    from sklearn.model_selection import train_test_split, cross_val_score, StratifiedKFold
+    from sklearn.metrics import accuracy_score, classification_report, confusion_matrix, roc_auc_score
     from sklearn.preprocessing import StandardScaler
     import warnings
     warnings.filterwarnings("ignore", category=UserWarning, module="sklearn")
     ML_AVAILABLE = True
 except ImportError:
     ML_AVAILABLE = False
-    print("⚠️ ML libraries not installed. Run: pip install scikit-learn numpy")
+    print("⚠️ ML libraries not installed. Run: pip install xgboost pandas scikit-learn")
 
 
 class MLTrainer:
@@ -52,10 +53,7 @@ class MLTrainer:
             # Try alternative file
             if os.path.exists("training_data.csv"):
                 self.data_file = "training_data.csv"
-                self.feature_columns = [
-                    'rsi', 'stoch_rsi', 'macd_hist', 'atr', 
-                    'obi', 'cvd', 'vol_ratio', 'vpin', 'liq_vol', 'trend_1h'
-                ]
+                # Use same standard features for all files
             else:
                 print(f"⚠️ Data file not found: {self.data_file}")
                 return None, None
@@ -101,23 +99,31 @@ class MLTrainer:
         X_train_scaled = self.scaler.fit_transform(X_train)
         X_test_scaled = self.scaler.transform(X_test)
         
-        # Train Random Forest
-        print("🔄 Training Random Forest...")
-        self.model = RandomForestClassifier(
-            n_estimators=100,
-            max_depth=10,
-            min_samples_split=5,
+        # Train XGBoost
+        print("🔄 Training XGBoost (Super Intelligence)...")
+        self.model = XGBClassifier(
+            n_estimators=300,
+            max_depth=6,
+            learning_rate=0.05,
+            subsample=0.8,
+            colsample_bytree=0.8,
             random_state=42,
+            use_label_encoder=False,
+            eval_metric='logloss',
             n_jobs=-1
         )
         self.model.fit(X_train_scaled, y_train)
         
-        # Evaluate
+        # Evaluate with ROC AUC
+        y_prob = self.model.predict_proba(X_test_scaled)[:, 1]
         y_pred = self.model.predict(X_test_scaled)
+        
         accuracy = accuracy_score(y_test, y_pred)
+        auc = roc_auc_score(y_test, y_prob)
         
         # Cross-validation
-        cv_scores = cross_val_score(self.model, X_train_scaled, y_train, cv=5)
+        cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+        cv_scores = cross_val_score(self.model, X_train_scaled, y_train, cv=cv)
         
         # Feature importance
         importance = dict(zip(self.feature_columns, self.model.feature_importances_))
@@ -125,6 +131,7 @@ class MLTrainer:
         
         results = {
             'accuracy': round(accuracy * 100, 2),
+            'auc': round(auc, 4),
             'cv_mean': round(cv_scores.mean() * 100, 2),
             'cv_std': round(cv_scores.std() * 100, 2),
             'feature_importance': importance,
@@ -198,9 +205,10 @@ class MLTrainer:
         print("🤖 ML MODEL TRAINING RESULTS")
         print("="*50)
         
-        print(f"\n📊 ACCURACY:")
-        print(f"   Test Accuracy: {results['accuracy']}%")
-        print(f"   Cross-Val Mean: {results['cv_mean']}% (±{results['cv_std']}%)")
+        print(f"\n📊 ACCURACY & CONFIDENCE:")
+        print(f"   Accuracy: {results['accuracy']}%")
+        print(f"   ROC AUC Core: {results.get('auc', 0)}")
+        print(f"   CV Mean: {results['cv_mean']}% (±{results['cv_std']}%)")
         
         print(f"\n🔑 FEATURE IMPORTANCE:")
         for feature, importance in results['feature_importance'].items():
